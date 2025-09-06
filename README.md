@@ -1,298 +1,262 @@
-# Building a Feedback Generator with LLMs
+# The Three-Part Pattern for Robust LLM Development
 
-This project demonstrates how to build a structured **feedback generator** using Large Language Models (LLMs). The design is modular:
+When building applications with Large Language Models, I've found that separating concerns into three distinct functions creates more maintainable, reliable, and testable code. This pattern has served me well across dozens of production applications.
 
-1. **Chat function** – handles all interactions with the language model API.
-2. **Generator function** – defines the system prompt, prepares data, and asks the model for a response.
-3. **Parser function** – interprets the raw LLM output into structured feedback and scores.
+## The Abstract Pattern
 
-This separation of concerns makes the system flexible, debuggable, and easy to extend.
+### 1. The Chat Function (Infrastructure Layer)
+**Purpose**: Handle all communication with language models, including error handling, retries, and fallbacks.
 
----
+**Responsibilities**:
+- API communication and authentication
+- Error handling and retry logic
+- Provider fallbacks (e.g., Groq → OpenAI)
+- Rate limit management
+- Response cleaning and normalization
 
-## Abstract Design
+**Key Principle**: This function should be provider-agnostic and focus purely on reliable message delivery.
 
-### 1. Chat Function (LLM Gateway)
+### 2. The Generator Function (Business Logic Layer)
+**Purpose**: Define the specific task, context, and requirements for the language model.
 
-The chat function is a **generic wrapper** around API calls to different providers (OpenAI, Groq, Anthropic, etc.).
-It:
+**Responsibilities**:
+- Construct system prompts with domain knowledge
+- Format input data appropriately
+- Define output requirements and constraints
+- Handle task-specific retry logic
+- Orchestrate the conversation flow
 
-* Accepts messages in the `{ role, content }` format.
-* Passes them to the model.
-* Returns the raw string response from the model.
-* Handles **fallbacks** (e.g., retrying with OpenAI if Groq is rate limited).
+**Key Principle**: This function contains all the domain expertise and prompt engineering for your specific use case.
 
-**Abstract Pseudocode:**
+### 3. The Parser Function (Data Processing Layer)
+**Purpose**: Transform raw LLM output into structured, validated data your application can use.
 
-```js
-async function chat(messages, model, options) {
-  // Clean and prepare messages
-  // Add special response format instructions if needed (e.g., JSON mode)
+**Responsibilities**:
+- Parse and validate LLM responses
+- Handle malformed or unexpected outputs
+- Convert to application-specific data structures
+- Provide meaningful error messages for failures
 
-  try {
-    // Send request to primary provider (Groq, OpenAI, etc.)
-    // If fails, retry with fallback
-    // Return the raw LLM response (string)
-  } catch (error) {
-    // Handle network errors, timeouts, retries
-  }
-}
-```
+**Key Principle**: This function should be defensive and handle the unpredictable nature of LLM outputs gracefully.
 
----
+## Benefits of This Pattern
 
-### 2. Generator Function (Task Logic)
-
-The generator function defines **what you want the LLM to do**.
-It:
-
-* Defines the **system prompt** (instructions).
-* Prepares a **conversation transcript**.
-* Sends everything to the chat function.
-* Returns parsed results.
-
-**Abstract Pseudocode:**
-
-```js
-async function generateFeedbackContent(messages, scenario) {
-  // Build the system prompt with task description
-  // Transform conversation into numbered format
-  // Wrap everything into messages for the LLM
-
-  // Send to chat function
-  const rawResponse = await chat(formattedMessages, chosenModel);
-
-  // Parse the LLM output into structured feedback
-  return parseFeedback(rawResponse);
-}
-```
-
----
-
-### 3. Parser Function (Output Interpreter)
-
-The parser ensures the model’s response is **usable by your application**.
-It:
-
-* Extracts feedback and scores.
-* Validates formatting.
-* Optionally retries if the response isn’t valid.
-
-**Abstract Pseudocode:**
-
-```js
-function parseFeedback(response) {
-  // Identify conversation feedback
-  // Extract numbered feedback
-  // Extract scoring categories with justifications
-  // Return structured JSON or object
-}
-```
+- **Separation of Concerns**: Each function has a single, clear responsibility
+- **Testability**: Each layer can be tested independently
+- **Reusability**: The chat function can be reused across different use cases
+- **Maintainability**: Changes to prompts, parsing, or providers are isolated
+- **Reliability**: Centralized error handling and fallback strategies
 
 ---
 
 ## Concrete Implementation
 
-Here’s how this looks in code.
+Let's build a simple email classification system that categorizes customer emails as "support", "sales", or "billing".
 
-### `chat.js` – The Chat Function
+### 1. The Chat Function - Infrastructure Layer
 
-```js
-export async function chat(
-  messages,
-  model = "gemma2-9b-it",
-  json_mode = false
-) {
-  const cleanedMessages = messages.map(({ role, content }) => ({ role, content }));
+```javascript
+export async function chat(messages, options = {}) {
+    const {
+        model = "llama-3.1-70b-versatile",
+        maxRetries = 3,
+        retryDelay = 1000
+    } = options;
 
-  const payload = { model, messages: cleanedMessages };
-  if (json_mode) payload.response_format = { type: "json_object" };
+    const payload = {
+        model,
+        messages: messages.map(({ role, content }) => ({ role, content }))
+    };
 
-  try {
-    // Special case for OpenAI model
-    if (payload.model === "gpt-4o-mini") {
-      const openaiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify(payload),
-      });
-      const data = await openaiResponse.json();
-      return data.choices[0].message.content.replace(/\*/g, "");
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            // Try primary provider (Groq)
+            const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (groqResponse.ok) {
+                const data = await groqResponse.json();
+                return data.choices[0].message.content;
+            }
+
+            // Fallback to OpenAI if Groq fails
+            console.log(`Groq failed (attempt ${attempt}), trying OpenAI...`);
+            
+            const openaiPayload = { ...payload, model: "gpt-4o-mini" };
+            const openaiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+                },
+                body: JSON.stringify(openaiPayload)
+            });
+
+            if (openaiResponse.ok) {
+                const data = await openaiResponse.json();
+                return data.choices[0].message.content;
+            }
+
+            throw new Error(`Both providers failed on attempt ${attempt}`);
+
+        } catch (error) {
+            console.error(`Attempt ${attempt} failed:`, error.message);
+            
+            if (attempt === maxRetries) {
+                throw new Error(`All ${maxRetries} attempts failed: ${error.message}`);
+            }
+
+            // Wait before retrying
+            await new Promise(resolve => setTimeout(resolve, retryDelay * attempt));
+        }
     }
-
-    // Default: Try Groq first
-    const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!groqResponse.ok) {
-      console.log("Rate limited by Groq, trying OpenAI...");
-      payload.model = "gpt-4o-mini";
-
-      const openaiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify(payload),
-      });
-      const data = await openaiResponse.json();
-      return data.choices[0].message.content.replace(/\*/g, "");
-    }
-
-    const data = await groqResponse.json();
-    return data.choices[0].message.content.replace(/\*/g, "");
-  } catch (error) {
-    console.error("Error:", error);
-    throw error;
-  }
 }
 ```
 
----
+### 2. The Generator Function - Business Logic Layer
 
-### `generator.js` – The Feedback Generator
+```javascript
+export async function classifyEmail(emailContent, senderEmail = null) {
+    const systemPrompt = `You are an expert email classifier for a customer service team.
 
-This is where the **system prompt** lives.
+Your task is to classify incoming customer emails into exactly one of these categories:
+- "support" - Technical issues, bug reports, how-to questions
+- "sales" - Pricing inquiries, product questions, purchase interest  
+- "billing" - Payment issues, invoice questions, subscription changes
 
-```js
-export async function generateFeedbackContent(messages, scenario) {
-  const { task, description, additional_context, inputMode, outputMode, inputScore, outputScore } = scenario;
+Guidelines:
+- Always respond with exactly one word: support, sales, or billing
+- If unclear, choose the most likely category based on context
+- Consider the sender's email domain for additional context
 
-  const system_msg = `# INSTRUCTIONS
+Examples:
+- "My app keeps crashing when I try to upload files" → support
+- "What's the difference between your Pro and Enterprise plans?" → sales  
+- "I was charged twice this month" → billing`;
 
-You are an English language tutor...
-(Task: ${task}, Description: ${description}, etc.)
-`;
+    const userMessage = senderEmail 
+        ? `Email from: ${senderEmail}\n\nContent: ${emailContent}`
+        : `Content: ${emailContent}`;
 
-  messages.shift(); // remove system message if present
+    const messages = [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage }
+    ];
 
-  let user_response_index = 1;
-  const conversation = messages.map((message) => {
-    if (message.role === "user") {
-      return `User response #${user_response_index++}: ${message.content}`;
-    }
-    return `${message.role}: ${message.content}`;
-  }).join("\n");
-
-  const formattedMessages = [
-    { role: "system", content: system_msg },
-    { role: "user", content: `## Conversation\n${conversation}\n\nOutput the feedback and scores.` }
-  ];
-
-  let retries = 0;
-  const maxRetries = 3;
-
-  while (retries < maxRetries) {
     try {
-      const response = await chat(formattedMessages, "llama-3.1-70b-versatile");
-      const result = parseFeedback(response);
-      return result;
+        const response = await chat(messages, { 
+            model: "llama-3.1-70b-versatile",
+            maxRetries: 3 
+        });
+        
+        return parseClassification(response);
     } catch (error) {
-      retries++;
-      console.error(error);
-
-      if (retries < maxRetries) {
-        formattedMessages.push({ role: "user", content: error.message });
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-      }
+        console.error("Failed to classify email:", error);
+        throw new Error("Email classification failed");
     }
-  }
-
-  throw new Error(`Failed to generate feedback content after ${maxRetries} attempts.`);
 }
 ```
 
----
+### 3. The Parser Function - Data Processing Layer
 
-### `parser.js` – The Parser (Simplified Example)
+```javascript
+function parseClassification(response) {
+    if (!response || typeof response !== 'string') {
+        throw new Error("Invalid response: expected string");
+    }
 
-```js
-export function parseFeedback(response) {
-  // In practice, you'd use regex or structured output
-  // For now, assume LLM followed instructions
-  return {
-    raw: response,
-    feedback: extractFeedback(response),
-    scores: extractScores(response),
-  };
-}
-
-function extractFeedback(response) {
-  // regex to find lines starting with numbers
-  return response.match(/\d+\.\s[^\n]+/g) || [];
-}
-
-function extractScores(response) {
-  // regex to find lines like "Grammar: 70/100 - ..."
-  return response.match(/[A-Za-z ]+: \d+\/100 - .+/g) || [];
+    // Clean and normalize the response
+    const cleaned = response.trim().toLowerCase();
+    
+    // Valid categories
+    const validCategories = ['support', 'sales', 'billing'];
+    
+    // Check for exact match
+    if (validCategories.includes(cleaned)) {
+        return cleaned;
+    }
+    
+    // Check if response contains a valid category
+    for (const category of validCategories) {
+        if (cleaned.includes(category)) {
+            return category;
+        }
+    }
+    
+    // Handle common variations
+    const variations = {
+        'tech': 'support',
+        'technical': 'support', 
+        'help': 'support',
+        'bug': 'support',
+        'sell': 'sales',
+        'buy': 'sales',
+        'purchase': 'sales',
+        'price': 'sales',
+        'payment': 'billing',
+        'invoice': 'billing',
+        'charge': 'billing',
+        'subscription': 'billing'
+    };
+    
+    for (const [variation, category] of Object.entries(variations)) {
+        if (cleaned.includes(variation)) {
+            return category;
+        }
+    }
+    
+    throw new Error(`Could not parse classification from response: "${response}"`);
 }
 ```
 
----
+### 4. Putting It All Together
 
-## How to Use
+```javascript
+// Usage example
+async function handleIncomingEmail(emailContent, senderEmail) {
+    try {
+        const category = await classifyEmail(emailContent, senderEmail);
+        
+        console.log(`Email classified as: ${category}`);
+        
+        // Route to appropriate team
+        switch (category) {
+            case 'support':
+                return routeToSupportTeam(emailContent, senderEmail);
+            case 'sales':
+                return routeToSalesTeam(emailContent, senderEmail);
+            case 'billing':
+                return routeToBillingTeam(emailContent, senderEmail);
+        }
+    } catch (error) {
+        console.error("Email processing failed:", error);
+        // Route to general queue as fallback
+        return routeToGeneralQueue(emailContent, senderEmail);
+    }
+}
 
-1. Clone the repo.
-2. Install dependencies:
-
-   ```bash
-   npm install
-   ```
-3. Add your API keys to `.env`:
-
-   ```env
-   OPENAI_API_KEY=your-key
-   GROQ_API_KEY=your-key
-   ```
-4. Run the generator with a sample conversation and scenario:
-
-   ```js
-   import { generateFeedbackContent } from "./generator.js";
-
-   const messages = [
-     { role: "assistant", content: "Hello! How can I help you today?" },
-     { role: "user", content: "I want join cooking class." },
-     // ...
-   ];
-
-   const scenario = {
-     task: "Joining a class",
-     description: "User registers for a cooking class",
-     additional_context: "",
-     inputMode: "Speaking",
-     outputMode: "Listening",
-     inputScore: 4,
-     outputScore: 5,
-   };
-
-   const feedback = await generateFeedbackContent(messages, scenario);
-   console.log(feedback);
-   ```
-
----
+// Example usage
+const email = "Hi, I'm interested in your enterprise pricing. Can you send me a quote?";
+const category = await classifyEmail(email, "john@company.com");
+// Returns: "sales"
+```
 
 ## Key Takeaways
 
-* **Separate responsibilities**:
+1. **Keep functions focused**: Each function has one clear responsibility
+2. **Plan for failure**: LLMs are unpredictable; always have fallbacks and error handling
+3. **Make it testable**: You can unit test each function independently
+4. **Provider flexibility**: The chat function abstracts away which LLM you're using
+5. **Graceful degradation**: If classification fails, the system still functions
 
-  * Chat = API interaction
-  * Generator = task definition
-  * Parser = result cleaning
-
-* **Robustness**: Retry on failures, fallback between providers.
-
-* **Reusability**: You can plug in any scenario (job interviews, customer support, classroom roleplays) without changing the core functions.
+This pattern scales beautifully from simple classification tasks to complex multi-turn conversations, making your LLM applications more reliable and maintainable.
 
 ---
 
-👉 This pattern is useful beyond language tutoring. You can apply it to **code review bots, interview simulations, customer service QA, or structured content generation**.
+*Follow me on LinkedIn for more practical AI development patterns and insights from building production LLM applications.*
